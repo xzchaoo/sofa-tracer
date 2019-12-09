@@ -51,7 +51,7 @@ public class MongoClientTracer extends AbstractClientTracer {
     }
 
     protected MongoClientTracer() {
-        super("open-feign");
+        super("mongodb");
     }
 
     @Override

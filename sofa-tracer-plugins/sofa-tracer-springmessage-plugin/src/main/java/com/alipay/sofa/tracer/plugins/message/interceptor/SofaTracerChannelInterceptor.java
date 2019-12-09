@@ -24,9 +24,13 @@ import com.alipay.common.tracer.core.span.CommonSpanTags;
 import com.alipay.common.tracer.core.span.SofaTracerSpan;
 import com.alipay.sofa.tracer.plugins.message.tracers.MessagePubTracer;
 import com.alipay.sofa.tracer.plugins.message.tracers.MessageSubTracer;
-import io.opentracing.tag.Tags;
+
 import org.apache.rocketmq.common.message.MessageClientExt;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.cloud.stream.binding.BindingService;
+import org.springframework.context.ApplicationContext;
 import org.springframework.integration.channel.AbstractMessageChannel;
 import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.context.IntegrationObjectSupport;
@@ -41,40 +45,76 @@ import org.springframework.messaging.support.ExecutorChannelInterceptor;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.messaging.support.MessageHeaderAccessor;
 import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
 
+import java.lang.reflect.Method;
 import java.util.Map;
+
+import io.opentracing.tag.Tags;
 
 /**
  * @author: guolei.sgl (guolei.sgl@antfin.com) 2019/12/5 3:20 PM
  * @since:
  **/
 public class SofaTracerChannelInterceptor implements ChannelInterceptor, ExecutorChannelInterceptor {
+    private static final Logger LOGGER = LoggerFactory.getLogger(SofaTracerChannelInterceptor.class);
 
-    private static final String    REMOTE_SERVICE_NAME           = "broker";
+    private static final String REMOTE_SERVICE_NAME = "broker";
 
-    public static final String     STREAM_DIRECT_CHANNEL         = "org.springframework.cloud.stream.messaging.DirectWithAttributesChannel";
+    public static final String STREAM_DIRECT_CHANNEL = "org.springframework.cloud.stream.messaging.DirectWithAttributesChannel";
 
-    final boolean                  integrationObjectSupportPresent;
-    private final boolean          hasDirectChannelClass;
+    final         boolean  integrationObjectSupportPresent;
+    private final boolean  hasDirectChannelClass;
     // special case of a Stream
-    private final Class<?>         directWithAttributesChannelClass;
+    private final Class<?> directWithAttributesChannelClass;
 
-    private static final String    SPAN_CONTEXT_KEY              = "STREAM_SPAM_CONTEXT_SOFA";
+    private static final String SPAN_CONTEXT_KEY = "STREAM_SPAM_CONTEXT_SOFA";
 
-    private static final String    ORIGINAL_ROCKETMQ_MESSAGE_KEY = "ORIGINAL_ROCKETMQ_MESSAGE";
+    private static final String ORIGINAL_ROCKETMQ_MESSAGE_KEY = "ORIGINAL_ROCKETMQ_MESSAGE";
 
-    private final MessageSubTracer messageSubTracer;
-    private final MessagePubTracer messagePubTracer;
+    private final        MessageSubTracer messageSubTracer;
+    private final        MessagePubTracer messagePubTracer;
+    private static final Method           GET_APPLICATION_CONTEXT = ReflectionUtils
+            .findMethod(
+                    IntegrationObjectSupport.class,
+                    "getApplicationContext");
+    private static final boolean          BINDING_SERVICE_PRESENT = ClassUtils
+            .isPresent(
+                    "org.springframework.cloud.stream.binding.BindingService",
+                    null);
+    private static final Method           GET_BINDER;
 
-    private final String           applicationName;
+    private static final Class<?> ROCKETMQ_BINDER_CLASS = ClassUtils
+            .isPresent(
+                    "org.springframework.cloud.stream.binder.rocketmq.RocketMQMessageChannelBinder",
+                    null) ? ClassUtils
+            .resolveClassName(
+                    "org.springframework.cloud.stream.binder.rocketmq.RocketMQMessageChannelBinder",
+                    null)
+            : null;
+
+    static {
+        GET_APPLICATION_CONTEXT.setAccessible(true);
+        if (BINDING_SERVICE_PRESENT) {
+            GET_BINDER = ReflectionUtils.findMethod(BindingService.class, "getBinder",
+                    String.class, Class.class);
+            GET_BINDER.setAccessible(true);
+        } else {
+            GET_BINDER = null;
+        }
+    }
+
+    private final String applicationName;
+
+    private BindingService bindingService;
 
     SofaTracerChannelInterceptor(String applicationName) {
         this.integrationObjectSupportPresent = ClassUtils.isPresent(
-            "org.springframework.integration.context.IntegrationObjectSupport", null);
+                "org.springframework.integration.context.IntegrationObjectSupport", null);
         this.hasDirectChannelClass = ClassUtils.isPresent(
-            "org.springframework.integration.channel.DirectChannel", null);
+                "org.springframework.integration.channel.DirectChannel", null);
         this.directWithAttributesChannelClass = ClassUtils.isPresent(STREAM_DIRECT_CHANNEL, null) ? ClassUtils
-            .resolveClassName(STREAM_DIRECT_CHANNEL, null) : null;
+                .resolveClassName(STREAM_DIRECT_CHANNEL, null) : null;
         messageSubTracer = MessageSubTracer.getMessageSubTracerSingleton();
         messagePubTracer = MessagePubTracer.getMessagePubTracerSingleton();
         this.applicationName = applicationName;
@@ -95,15 +135,17 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
         SofaTracerSpan sofaTracerSpan;
         if (spanContextSerialize instanceof String) {
             SofaTracerSpanContext spanContext = SofaTracerSpanContext
-                .deserializeFromString(spanContextSerialize.toString());
+                    .deserializeFromString(spanContextSerialize.toString());
             sofaTracerSpan = messageSubTracer.serverReceive(spanContext);
             sofaTracerSpan.setOperationName("mq-message-receive");
         } else {
             sofaTracerSpan = messagePubTracer.clientSend("mq-message-send");
         }
+        String binderName = getBinder(channel);
+        sofaTracerSpan.setTag("binder.type", binderName);
         // 塞回到 headers 中去
         headers.setHeader(SPAN_CONTEXT_KEY, sofaTracerSpan.getSofaTracerSpanContext()
-            .serializeSpanContext());
+                .serializeSpanContext());
         Message<?> outputMessage = outputMessage(message, retrievedMessage, headers);
         if (isDirectChannel(channel)) {
             beforeHandle(outputMessage, channel, null);
@@ -111,12 +153,37 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
         return outputMessage;
     }
 
+    private String getBinder(MessageChannel channel) {
+        if (BINDING_SERVICE_PRESENT && channel instanceof AbstractMessageChannel) {
+            AbstractMessageChannel amc = (AbstractMessageChannel) channel;
+            try {
+                if (bindingService == null) {
+                    if (channel instanceof AbstractMessageChannel) {
+                        ApplicationContext applicationContext = (ApplicationContext) GET_APPLICATION_CONTEXT
+                                .invoke(channel);
+                        bindingService = applicationContext.getBean(BindingService.class);
+                    }
+                }
+                if (bindingService != null) {
+                    Object binder = GET_BINDER.invoke(bindingService, amc.getFullChannelName(),
+                            amc.getClass());
+                    if (ROCKETMQ_BINDER_CLASS.isAssignableFrom(binder.getClass())) {
+                        return "ROCKETMQ";
+                    }
+                }
+            } catch (Throwable e) {
+                LOGGER.error("Fail to get binder from channel {}", channel, e);
+            }
+        }
+        return "UNKNOWN";
+    }
+
     private Object parseSpanContext(MessageHeaderAccessor headers) {
         Object spanContext = null;
         // adapter for rocketmq
         if (headers.getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY) instanceof MessageClientExt) {
             MessageClientExt msg = (MessageClientExt) headers
-                .getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY);
+                    .getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY);
             Map<String, String> properties = msg.getProperties();
             if (properties.containsKey(SPAN_CONTEXT_KEY)) {
                 spanContext = properties.get(SPAN_CONTEXT_KEY);
@@ -133,8 +200,9 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
         }
         if (isDirectChannel(channel)) {
             afterMessageHandled(message, channel, null, ex);
+        } else {
+            finishSpan(ex, message, channel);
         }
-        finishSpan(ex, message, channel);
     }
 
     @Override
@@ -168,7 +236,7 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
         String messageId = message.getHeaders().getId().toString();
         if (headers.getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY) instanceof MessageClientExt) {
             MessageClientExt msg = (MessageClientExt) headers
-                .getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY);
+                    .getHeader(ORIGINAL_ROCKETMQ_MESSAGE_KEY);
             messageId = msg.getMsgId();
             String topic = msg.getTopic();
             sofaTracerSpan.setTag(CommonSpanTags.MSG_TOPIC, topic);
@@ -241,7 +309,7 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
 
     private boolean isWebSockets(MessageHeaderAccessor headerAccessor) {
         return headerAccessor.getMessageHeaders().containsKey("stompCommand")
-               || headerAccessor.getMessageHeaders().containsKey("simpMessageType");
+                || headerAccessor.getMessageHeaders().containsKey("simpMessageType");
     }
 
     private Message<?> outputMessage(Message<?> originalMessage, Message<?> retrievedMessage,
@@ -249,19 +317,19 @@ public class SofaTracerChannelInterceptor implements ChannelInterceptor, Executo
         MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(originalMessage);
         if (originalMessage.getPayload() instanceof MessagingException) {
             return new ErrorMessage((MessagingException) originalMessage.getPayload(),
-                isWebSockets(headers) ? headers.getMessageHeaders() : new MessageHeaders(
-                    headers.getMessageHeaders()));
+                    isWebSockets(headers) ? headers.getMessageHeaders() : new MessageHeaders(
+                            headers.getMessageHeaders()));
         }
         headers.copyHeaders(additionalHeaders.getMessageHeaders());
         return new GenericMessage<>(retrievedMessage.getPayload(),
-            isWebSockets(headers) ? headers.getMessageHeaders() : new MessageHeaders(
-                headers.getMessageHeaders()));
+                isWebSockets(headers) ? headers.getMessageHeaders() : new MessageHeaders(
+                        headers.getMessageHeaders()));
     }
 
     private boolean isDirectChannel(MessageChannel channel) {
         Class<?> targetClass = AopUtils.getTargetClass(channel);
         boolean directChannel = this.hasDirectChannelClass
-                                && DirectChannel.class.isAssignableFrom(targetClass);
+                && DirectChannel.class.isAssignableFrom(targetClass);
         if (!directChannel) {
             return false;
         }
