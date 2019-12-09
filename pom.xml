@@ -27,6 +27,7 @@
         <module>sofa-tracer-plugins/sofa-tracer-resttmplate-plugin</module>
         <module>sofa-tracer-plugins/sofa-tracer-flexible-plugin</module>
         <module>sofa-tracer-plugins/sofa-tracer-dubbo-2.6.x-plugin</module>
+        <module>sofa-tracer-plugins/sofa-tracer-springmessage-plugin</module>
         <module>tracer-all</module>
         <module>tracer-sofa-boot-starter</module>
         <module>tracer-test/core-test</module>
@@ -138,6 +139,11 @@
             </dependency>
             <dependency>
                 <groupId>com.alipay.sofa</groupId>
+                <artifactId>sofa-tracer-springmessage-plugin</artifactId>
+                <version>${sofa.tracer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alipay.sofa</groupId>
                 <artifactId>tracer-all</artifactId>
                 <version>${sofa.tracer.version}</version>
             </dependency>
@@ -173,6 +179,19 @@
                 <artifactId>spring-cloud-starter-openfeign</artifactId>
                 <version>2.1.0.RELEASE</version>
                 <scope>provided</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-stream</artifactId>
+                <version>2.1.0.RELEASE</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.rocketmq</groupId>
+                <artifactId>rocketmq-client</artifactId>
+                <version>4.4.0</version>
             </dependency>
 
             <!-- 对外部框架的一些插件使用 -->
