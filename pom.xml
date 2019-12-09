@@ -29,6 +29,7 @@
         <module>sofa-tracer-plugins/sofa-tracer-dubbo-2.6.x-plugin</module>
         <module>sofa-tracer-plugins/sofa-tracer-springmessage-plugin</module>
         <module>sofa-tracer-plugins/sofa-tracer-mongodb-plugin</module>
+        <module>sofa-tracer-plugins/sofa-tracer-redis-plugin</module>
         <module>tracer-all</module>
         <module>tracer-sofa-boot-starter</module>
         <module>tracer-test/core-test</module>
